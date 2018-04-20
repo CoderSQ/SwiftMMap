@@ -105,15 +105,27 @@ class ViewController: UIViewController {
     
     func handleFile() {
         
-        let fhIn = FileHandle.init(forReadingAtPath: filePath)
-        let fhOut = FileHandle.init(forWritingAtPath: filePathOut)
+        let filePath = Bundle.main.path(forResource: "data", ofType: "txt")
+        let filePathOut = Bundle.main.path(forResource: "dataout", ofType: ".txt")
         
-        let fhOutSize = fhOut?.seekToEndOfFile()
+        let fhIn = FileHandle.init(forReadingAtPath: filePath!)
+        let fhOut = FileHandle.init(forWritingAtPath: filePathOut!)
+        
+        // 清空输出文件的内容
+        fhOut?.truncateFile(atOffset: 0)
+        
+        // 获取文件大小
         let fileSize = fhIn?.seekToEndOfFile()
         
+        // 由于要处理的文件较大，所以不能一次将文件全部映射进内存，采用一个合适的映射内存大小。
+        // 通过count来执行映射次数
         let count = fileSize! / MEM_SIZE
+        // 剩余部分内存
         let leftSize = fileSize! % MEM_SIZE
         
+        
+        // 两部分分开处理，剩余部分写入
+        // 文件最后的，写入文件的最开始位置
         let leftPart = mmap(UnsafeMutableRawPointer.init(bitPattern: 0), Int(leftSize), PROT_READ, MAP_SHARED, fhIn!.fileDescriptor, off_t(MEM_SIZE * count))
         if leftPart == MAP_FAILED {
             print("剩余部分映射失败)")
@@ -131,9 +143,15 @@ class ViewController: UIViewController {
         
         print("剩余部分写入成功")
         
+        
+        // 多线程处理大小的内存，加快处理速度
         let queue = OperationQueue.init()
+        queue.maxConcurrentOperationCount = 5 // 设置最大并发数，线程太多，因为线程切换，速度反而也降低
+
+        // 使用信号量，防止资源写入的时候，多线程seek文件的问题
         let semaphore = DispatchSemaphore.init(value: 1)
         
+        // 从第0到count段数据，分别写入文件的相应位置
         for i in 0..<count {
             
             queue.addOperation {
@@ -146,24 +164,25 @@ class ViewController: UIViewController {
                 let buf = malloc(Int(MEM_SIZE))
                 memcpy(buf, part, Int(MEM_SIZE))
                 var data = Data.init(bytes: buf!, count: Int(MEM_SIZE))
+                // 数据倒叙
                 data.reverse()
                 free(buf)
                 
-                semaphore.wait()
+                semaphore.wait() // 抢占信号资源
                 fhOut?.seek(toFileOffset: leftSize + MEM_SIZE * (count - i - 1))
                 fhOut?.write(data)
                 fhOut?.synchronizeFile()
-                semaphore.signal()
+                semaphore.signal() // 释放信号资源
 
                 munmap(part, Int(MEM_SIZE))
                 print("操作成功 i= \(i)")
             }
         }
         
+        //等队列中所有操作结束，才能执行后面的close句柄的操作
         queue.waitUntilAllOperationsAreFinished()
         fhIn?.closeFile()
         fhOut?.closeFile()
-        
     }
 
     override func didReceiveMemoryWarning() {
